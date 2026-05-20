@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   BadgePercent,
@@ -20,6 +20,7 @@ import "./styles.css";
 const PRODUCTS_KEY = "vedikadai.products";
 const ORDERS_KEY = "vedikadai.orders";
 const STORE_CONTACT_KEY = "vedikadai.storeContact";
+const API_BASE = "http://localhost:4000/api";
 
 const categories = ["Ground-made", "Sivakasi Fancy"];
 
@@ -89,6 +90,22 @@ function writeStorage(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
+async function apiGet(path) {
+  const response = await fetch(`${API_BASE}/${path}`);
+  if (!response.ok) throw new Error(`API GET ${path} failed`);
+  return response.json();
+}
+
+async function apiSend(path, method, body) {
+  const response = await fetch(`${API_BASE}/${path}`, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) throw new Error(`API ${method} ${path} failed`);
+  return response.json();
+}
+
 function formatPrice(value) {
   return new Intl.NumberFormat("en-IN", {
     style: "currency",
@@ -135,6 +152,7 @@ function App() {
   const [orders, setOrders] = useState(() => readStorage(ORDERS_KEY, []));
   const [storeContact, setStoreContact] = useState(() => readStorage(STORE_CONTACT_KEY, defaultStoreContact));
   const [isAdminAuthed, setIsAdminAuthed] = useState(false);
+  const apiAvailable = useRef(false);
 
   useEffect(() => {
     if (!localStorage.getItem(PRODUCTS_KEY)) {
@@ -155,6 +173,82 @@ function App() {
   useEffect(() => writeStorage(PRODUCTS_KEY, products), [products]);
   useEffect(() => writeStorage(ORDERS_KEY, orders), [orders]);
   useEffect(() => writeStorage(STORE_CONTACT_KEY, storeContact), [storeContact]);
+
+  useEffect(() => {
+    const loadDatabase = async () => {
+      try {
+        const [serverProducts, serverOrders, serverContact] = await Promise.all([
+          apiGet("products"),
+          apiGet("orders"),
+          apiGet("contact")
+        ]);
+        apiAvailable.current = true;
+        setProducts(normalizeProducts(serverProducts));
+        setOrders(serverOrders);
+        setStoreContact(serverContact);
+      } catch {
+        apiAvailable.current = false;
+      }
+    };
+
+    loadDatabase();
+  }, []);
+
+  useEffect(() => {
+    if (view !== "admin" || !isAdminAuthed) return undefined;
+
+    const refreshOrders = async () => {
+      try {
+        const serverOrders = await apiGet("orders");
+        apiAvailable.current = true;
+        setOrders(serverOrders);
+      } catch {
+        apiAvailable.current = false;
+      }
+    };
+
+    refreshOrders();
+    const intervalId = window.setInterval(refreshOrders, 8000);
+    return () => window.clearInterval(intervalId);
+  }, [view, isAdminAuthed]);
+
+  const saveProducts = (updater) => {
+    setProducts((current) => {
+      const next = normalizeProducts(typeof updater === "function" ? updater(current) : updater);
+      apiSend("products", "PUT", next).catch(() => {
+        apiAvailable.current = false;
+      });
+      return next;
+    });
+  };
+
+  const saveOrders = (updater) => {
+    setOrders((current) => {
+      const next = typeof updater === "function" ? updater(current) : updater;
+      apiSend("orders", "PUT", next).catch(() => {
+        apiAvailable.current = false;
+      });
+      return next;
+    });
+  };
+
+  const saveStoreContact = (contact) => {
+    setStoreContact(contact);
+    apiSend("contact", "PUT", contact).catch(() => {
+      apiAvailable.current = false;
+    });
+  };
+
+  const addOrder = async (order) => {
+    try {
+      const savedOrder = await apiSend("orders", "POST", order);
+      apiAvailable.current = true;
+      setOrders((current) => [savedOrder, ...current.filter((item) => item.id !== savedOrder.id)]);
+    } catch {
+      apiAvailable.current = false;
+      setOrders((current) => [order, ...current]);
+    }
+  };
 
   useEffect(() => {
     const handlePopState = () => {
@@ -180,18 +274,18 @@ function App() {
       {view === "store" ? (
         <Storefront
           products={products}
-          setOrders={setOrders}
+          addOrder={addOrder}
           storeContact={storeContact}
           onAdminClick={goAdmin}
         />
       ) : isAdminAuthed ? (
         <AdminDashboard
           products={products}
-          setProducts={setProducts}
+          setProducts={saveProducts}
           orders={orders}
-          setOrders={setOrders}
+          setOrders={saveOrders}
           storeContact={storeContact}
-          setStoreContact={setStoreContact}
+          setStoreContact={saveStoreContact}
           onLogout={() => {
             setIsAdminAuthed(false);
             goStore();
@@ -204,7 +298,7 @@ function App() {
   );
 }
 
-function Storefront({ products, setOrders, storeContact, onAdminClick }) {
+function Storefront({ products, addOrder, storeContact, onAdminClick }) {
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [cart, setCart] = useState([]);
   const [cartOpen, setCartOpen] = useState(false);
@@ -242,7 +336,7 @@ function Storefront({ products, setOrders, storeContact, onAdminClick }) {
     );
   };
 
-  const submitOrder = (customer) => {
+  const submitOrder = async (customer) => {
     const order = {
       id: `order-${Date.now()}`,
       createdAt: new Date().toISOString(),
@@ -252,7 +346,7 @@ function Storefront({ products, setOrders, storeContact, onAdminClick }) {
       savings: cartSavings,
       status: "Order Pending"
     };
-    setOrders((orders) => [order, ...orders]);
+    await addOrder(order);
     setCart([]);
     setCartOpen(false);
     setCheckoutOpen(false);
