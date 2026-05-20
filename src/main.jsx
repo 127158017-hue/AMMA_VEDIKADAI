@@ -15,12 +15,12 @@ import {
   Trash2,
   X
 } from "lucide-react";
+import { isSupabaseConfigured, supabase } from "./supabaseClient";
 import "./styles.css";
 
 const PRODUCTS_KEY = "vedikadai.products";
 const ORDERS_KEY = "vedikadai.orders";
 const STORE_CONTACT_KEY = "vedikadai.storeContact";
-const API_BASE = "http://localhost:4000/api";
 
 const categories = ["Ground-made", "Sivakasi Fancy"];
 
@@ -90,28 +90,58 @@ function writeStorage(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
-async function apiGet(path) {
-  const response = await fetch(`${API_BASE}/${path}`);
-  if (!response.ok) throw new Error(`API GET ${path} failed`);
-  return response.json();
-}
-
-async function apiSend(path, method, body) {
-  const response = await fetch(`${API_BASE}/${path}`, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  if (!response.ok) throw new Error(`API ${method} ${path} failed`);
-  return response.json();
-}
-
 function formatPrice(value) {
   return new Intl.NumberFormat("en-IN", {
     style: "currency",
     currency: "INR",
     maximumFractionDigits: 0
   }).format(value);
+}
+
+function productFromSupabase(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    category: row.category,
+    mrp: Number(row.mrp || 0),
+    price: Number(row.price || 0),
+    imageUrl: row.image_url || ""
+  };
+}
+
+function productToSupabase(product) {
+  return {
+    id: product.id,
+    title: product.title,
+    category: product.category,
+    mrp: Number(product.mrp || product.price || 0),
+    price: Number(product.price || 0),
+    image_url: product.imageUrl || ""
+  };
+}
+
+function orderFromSupabase(row) {
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    customer: row.customer,
+    items: row.items,
+    total: Number(row.total || 0),
+    savings: Number(row.savings || 0),
+    status: row.status || "Order Pending"
+  };
+}
+
+function orderToSupabase(order) {
+  return {
+    id: order.id,
+    created_at: order.createdAt,
+    customer: order.customer,
+    items: order.items,
+    total: Number(order.total || 0),
+    savings: Number(order.savings || 0),
+    status: order.status || "Order Pending"
+  };
 }
 
 function normalizeProducts(products) {
