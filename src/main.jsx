@@ -182,7 +182,7 @@ function App() {
   const [orders, setOrders] = useState(() => readStorage(ORDERS_KEY, []));
   const [storeContact, setStoreContact] = useState(() => readStorage(STORE_CONTACT_KEY, defaultStoreContact));
   const [isAdminAuthed, setIsAdminAuthed] = useState(false);
-  const apiAvailable = useRef(false);
+  const databaseAvailable = useRef(false);
 
   useEffect(() => {
     if (!localStorage.getItem(PRODUCTS_KEY)) {
@@ -206,18 +206,31 @@ function App() {
 
   useEffect(() => {
     const loadDatabase = async () => {
+      if (!isSupabaseConfigured) return;
+
       try {
-        const [serverProducts, serverOrders, serverContact] = await Promise.all([
-          apiGet("products"),
-          apiGet("orders"),
-          apiGet("contact")
+        const [productsResult, ordersResult, contactResult] = await Promise.all([
+          supabase.from("products").select("*").order("created_at", { ascending: true }),
+          supabase.from("orders").select("*").order("created_at", { ascending: false }),
+          supabase.from("store_contact").select("*").eq("id", 1).maybeSingle()
         ]);
-        apiAvailable.current = true;
-        setProducts(normalizeProducts(serverProducts));
-        setOrders(serverOrders);
-        setStoreContact(serverContact);
-      } catch {
-        apiAvailable.current = false;
+
+        if (productsResult.error) throw productsResult.error;
+        if (ordersResult.error) throw ordersResult.error;
+        if (contactResult.error) throw contactResult.error;
+
+        databaseAvailable.current = true;
+        setProducts(normalizeProducts(productsResult.data.map(productFromSupabase)));
+        setOrders(ordersResult.data.map(orderFromSupabase));
+        if (contactResult.data) {
+          setStoreContact({
+            phone: contactResult.data.phone || "",
+            email: contactResult.data.email || ""
+          });
+        }
+      } catch (error) {
+        console.error("Supabase load failed", error);
+        databaseAvailable.current = false;
       }
     };
 
@@ -226,14 +239,20 @@ function App() {
 
   useEffect(() => {
     if (view !== "admin" || !isAdminAuthed) return undefined;
+    if (!isSupabaseConfigured) return undefined;
 
     const refreshOrders = async () => {
       try {
-        const serverOrders = await apiGet("orders");
-        apiAvailable.current = true;
-        setOrders(serverOrders);
-      } catch {
-        apiAvailable.current = false;
+        const { data, error } = await supabase
+          .from("orders")
+          .select("*")
+          .order("created_at", { ascending: false });
+        if (error) throw error;
+        databaseAvailable.current = true;
+        setOrders(data.map(orderFromSupabase));
+      } catch (error) {
+        console.error("Supabase order refresh failed", error);
+        databaseAvailable.current = false;
       }
     };
 
@@ -245,9 +264,30 @@ function App() {
   const saveProducts = (updater) => {
     setProducts((current) => {
       const next = normalizeProducts(typeof updater === "function" ? updater(current) : updater);
-      apiSend("products", "PUT", next).catch(() => {
-        apiAvailable.current = false;
-      });
+
+      if (isSupabaseConfigured) {
+        const removedIds = current
+          .filter((product) => !next.some((nextProduct) => nextProduct.id === product.id))
+          .map((product) => product.id);
+
+        supabase
+          .from("products")
+          .upsert(next.map(productToSupabase))
+          .then(({ error }) => {
+            if (error) throw error;
+            if (removedIds.length === 0) return null;
+            return supabase.from("products").delete().in("id", removedIds);
+          })
+          .then((deleteResult) => {
+            if (deleteResult?.error) throw deleteResult.error;
+            databaseAvailable.current = true;
+          })
+          .catch((error) => {
+            console.error("Supabase product save failed", error);
+            databaseAvailable.current = false;
+          });
+      }
+
       return next;
     });
   };
@@ -255,27 +295,62 @@ function App() {
   const saveOrders = (updater) => {
     setOrders((current) => {
       const next = typeof updater === "function" ? updater(current) : updater;
-      apiSend("orders", "PUT", next).catch(() => {
-        apiAvailable.current = false;
-      });
+
+      if (isSupabaseConfigured) {
+        supabase
+          .from("orders")
+          .upsert(next.map(orderToSupabase))
+          .then(({ error }) => {
+            if (error) throw error;
+            databaseAvailable.current = true;
+          })
+          .catch((error) => {
+            console.error("Supabase order save failed", error);
+            databaseAvailable.current = false;
+          });
+      }
+
       return next;
     });
   };
 
   const saveStoreContact = (contact) => {
     setStoreContact(contact);
-    apiSend("contact", "PUT", contact).catch(() => {
-      apiAvailable.current = false;
-    });
+
+    if (isSupabaseConfigured) {
+      supabase
+        .from("store_contact")
+        .upsert({ id: 1, phone: contact.phone, email: contact.email })
+        .then(({ error }) => {
+          if (error) throw error;
+          databaseAvailable.current = true;
+        })
+        .catch((error) => {
+          console.error("Supabase contact save failed", error);
+          databaseAvailable.current = false;
+        });
+    }
   };
 
   const addOrder = async (order) => {
+    if (!isSupabaseConfigured) {
+      setOrders((current) => [order, ...current]);
+      return;
+    }
+
     try {
-      const savedOrder = await apiSend("orders", "POST", order);
-      apiAvailable.current = true;
+      const { data, error } = await supabase
+        .from("orders")
+        .insert(orderToSupabase(order))
+        .select()
+        .single();
+      if (error) throw error;
+      const savedOrder = orderFromSupabase(data);
+      databaseAvailable.current = true;
       setOrders((current) => [savedOrder, ...current.filter((item) => item.id !== savedOrder.id)]);
-    } catch {
-      apiAvailable.current = false;
+    } catch (error) {
+      console.error("Supabase order create failed", error);
+      databaseAvailable.current = false;
       setOrders((current) => [order, ...current]);
     }
   };

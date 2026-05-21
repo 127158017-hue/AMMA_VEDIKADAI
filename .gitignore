@@ -1,6 +1,10 @@
 node_modules/
 dist/
 .vite-cache/
+.firebase/
+.env
+.env.local
+firebase-debug.log
 data/db.json
 vite.log
 vite.err.log
