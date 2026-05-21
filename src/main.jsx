@@ -26,7 +26,8 @@ import {
   setDoc,
   writeBatch
 } from "firebase/firestore";
-import { db } from "./firebaseClient";
+import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
+import { db, storage } from "./firebaseClient";
 import "./styles.css";
 
 const PRODUCTS_KEY = "vedikadai.products";
@@ -184,6 +185,11 @@ function sortOrders(orders) {
   });
 }
 
+async function fetchFirebaseProducts() {
+  const productsSnapshot = await getDocs(query(collection(db, "products"), orderBy("createdAt", "asc")));
+  return normalizeProducts(productsSnapshot.docs.map((item) => productFromFirebase(item.id, item.data())));
+}
+
 async function fetchFirebaseOrders() {
   const collectionNames = ["orders", "Orders"];
   const snapshots = await Promise.all(
@@ -268,16 +274,15 @@ function App() {
   useEffect(() => {
     const loadDatabase = async () => {
       try {
-        const [productsSnapshot, firebaseOrders, contactSnapshot] = await Promise.all([
-          getDocs(query(collection(db, "products"), orderBy("createdAt", "asc"))),
+        const [firebaseProducts, firebaseOrders, contactSnapshot] = await Promise.all([
+          fetchFirebaseProducts(),
           fetchFirebaseOrders(),
           getDoc(doc(db, "storeContact", "main"))
         ]);
 
         databaseAvailable.current = true;
-        const firebaseProducts = productsSnapshot.docs.map((item) => productFromFirebase(item.id, item.data()));
         if (firebaseProducts.length) {
-          setProducts(normalizeProducts(firebaseProducts));
+          setProducts(firebaseProducts);
         } else {
           setProducts(sampleProducts);
           await Promise.all(
@@ -328,7 +333,9 @@ function App() {
         ...next.map((product) => setDoc(doc(db, "products", product.id), productToFirebase(product))),
         ...removedIds.map((id) => deleteDoc(doc(db, "products", id)))
       ])
-        .then(() => {
+        .then(async () => {
+          const firebaseProducts = await fetchFirebaseProducts();
+          setProducts(firebaseProducts);
           databaseAvailable.current = true;
         })
         .catch((error) => {
@@ -1121,16 +1128,45 @@ function AdminDashboard({ products, setProducts, orders, setOrders, storeContact
 function ManageProducts({ products, setProducts }) {
   const [form, setForm] = useState({ title: "", category: "Ground-made", mrp: "", price: "", imageUrl: "" });
   const [imageName, setImageName] = useState("");
+  const [imageBusy, setImageBusy] = useState(false);
+  const [imageError, setImageError] = useState("");
 
-  const handleImageUpload = (event) => {
+  const handleImageUpload = async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      setForm((current) => ({ ...current, imageUrl: String(reader.result || "") }));
+    if (!file.type.startsWith("image/")) {
+      setImageError("Please choose an image file.");
+      return;
+    }
+
+    setImageBusy(true);
+    setImageError("");
+
+    try {
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "-");
+      const imageRef = ref(storage, `product-images/${Date.now()}-${safeName}`);
+      await uploadBytes(imageRef, file);
+      const downloadUrl = await getDownloadURL(imageRef);
+      setForm((current) => ({ ...current, imageUrl: downloadUrl }));
       setImageName(file.name);
-    };
-    reader.readAsDataURL(file);
+    } catch (error) {
+      console.error("Firebase image upload failed", error);
+      if (file.size <= 650000) {
+        const inlineImage = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        setForm((current) => ({ ...current, imageUrl: inlineImage }));
+        setImageName(`${file.name} (inline fallback)`);
+        setImageError("Firebase Storage is not enabled yet, so this small image was saved inline. Enable Storage for bigger photos.");
+      } else {
+        setImageError("Image upload failed because Firebase Storage is not enabled. Enable Storage, or paste an image URL.");
+      }
+    } finally {
+      setImageBusy(false);
+    }
   };
 
   const addProduct = (event) => {
@@ -1224,9 +1260,12 @@ function ManageProducts({ products, setProducts }) {
             accept="image/*"
             type="file"
             onChange={handleImageUpload}
+            disabled={imageBusy}
             className="form-input file:mr-3 file:rounded-md file:border-0 file:bg-orange-100 file:px-3 file:py-2 file:font-bold file:text-flame"
           />
         </label>
+        {imageBusy && <p className="mt-2 text-sm font-bold text-stone-500">Uploading image to Firebase Storage...</p>}
+        {imageError && <p className="mt-2 rounded-md bg-red-50 px-3 py-2 text-sm font-bold text-red-700">{imageError}</p>}
         {form.imageUrl && (
           <div className="mt-4 overflow-hidden rounded-lg border border-orange-100 bg-orange-50">
             <img src={form.imageUrl} alt="Product preview" className="h-36 w-full object-cover" />
@@ -1275,7 +1314,10 @@ function ManageProducts({ products, setProducts }) {
                   </td>
                   <td className="px-4 py-3 text-stone-500">
                     {product.imageUrl ? (
-                      <img src={product.imageUrl} alt={product.title} className="h-12 w-16 rounded-md object-cover" />
+                      <div className="flex items-center gap-3">
+                        <img src={product.imageUrl} alt={product.title} className="h-12 w-16 rounded-md object-cover" />
+                        <span className="text-xs font-bold text-green-700">Image saved</span>
+                      </div>
                     ) : (
                       <span className="inline-flex items-center gap-2">
                         <ImageIcon size={16} />
