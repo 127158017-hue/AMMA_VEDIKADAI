@@ -15,7 +15,18 @@ import {
   Trash2,
   X
 } from "lucide-react";
-import { isSupabaseConfigured, supabase } from "./supabaseClient";
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  orderBy,
+  query,
+  setDoc,
+  writeBatch
+} from "firebase/firestore";
+import { db } from "./firebaseClient";
 import "./styles.css";
 
 const PRODUCTS_KEY = "vedikadai.products";
@@ -98,44 +109,43 @@ function formatPrice(value) {
   }).format(value);
 }
 
-function productFromSupabase(row) {
+function productFromFirebase(id, data) {
   return {
-    id: row.id,
-    title: row.title,
-    category: row.category,
-    mrp: Number(row.mrp || 0),
-    price: Number(row.price || 0),
-    imageUrl: row.image_url || ""
+    id,
+    title: data.title,
+    category: data.category,
+    mrp: Number(data.mrp || 0),
+    price: Number(data.price || 0),
+    imageUrl: data.imageUrl || ""
   };
 }
 
-function productToSupabase(product) {
+function productToFirebase(product) {
   return {
-    id: product.id,
     title: product.title,
     category: product.category,
     mrp: Number(product.mrp || product.price || 0),
     price: Number(product.price || 0),
-    image_url: product.imageUrl || ""
+    imageUrl: product.imageUrl || "",
+    createdAt: product.createdAt || new Date().toISOString()
   };
 }
 
-function orderFromSupabase(row) {
+function orderFromFirebase(id, data) {
   return {
-    id: row.id,
-    createdAt: row.created_at,
-    customer: row.customer,
-    items: row.items,
-    total: Number(row.total || 0),
-    savings: Number(row.savings || 0),
-    status: row.status || "Order Pending"
+    id,
+    createdAt: data.createdAt,
+    customer: data.customer,
+    items: data.items,
+    total: Number(data.total || 0),
+    savings: Number(data.savings || 0),
+    status: data.status || "Order Pending"
   };
 }
 
-function orderToSupabase(order) {
+function orderToFirebase(order) {
   return {
-    id: order.id,
-    created_at: order.createdAt,
+    createdAt: order.createdAt,
     customer: order.customer,
     items: order.items,
     total: Number(order.total || 0),
@@ -206,30 +216,30 @@ function App() {
 
   useEffect(() => {
     const loadDatabase = async () => {
-      if (!isSupabaseConfigured) return;
-
       try {
-        const [productsResult, ordersResult, contactResult] = await Promise.all([
-          supabase.from("products").select("*").order("created_at", { ascending: true }),
-          supabase.from("orders").select("*").order("created_at", { ascending: false }),
-          supabase.from("store_contact").select("*").eq("id", 1).maybeSingle()
+        const [productsSnapshot, ordersSnapshot, contactSnapshot] = await Promise.all([
+          getDocs(query(collection(db, "products"), orderBy("createdAt", "asc"))),
+          getDocs(query(collection(db, "orders"), orderBy("createdAt", "desc"))),
+          getDoc(doc(db, "storeContact", "main"))
         ]);
 
-        if (productsResult.error) throw productsResult.error;
-        if (ordersResult.error) throw ordersResult.error;
-        if (contactResult.error) throw contactResult.error;
-
         databaseAvailable.current = true;
-        setProducts(normalizeProducts(productsResult.data.map(productFromSupabase)));
-        setOrders(ordersResult.data.map(orderFromSupabase));
-        if (contactResult.data) {
-          setStoreContact({
-            phone: contactResult.data.phone || "",
-            email: contactResult.data.email || ""
-          });
+        const firebaseProducts = productsSnapshot.docs.map((item) => productFromFirebase(item.id, item.data()));
+        if (firebaseProducts.length) {
+          setProducts(normalizeProducts(firebaseProducts));
+        } else {
+          setProducts(sampleProducts);
+          await Promise.all(
+            sampleProducts.map((product) => setDoc(doc(db, "products", product.id), productToFirebase(product)))
+          );
+        }
+        setOrders(ordersSnapshot.docs.map((item) => orderFromFirebase(item.id, item.data())));
+        if (contactSnapshot.exists()) {
+          const contact = contactSnapshot.data();
+          setStoreContact({ phone: contact.phone || "", email: contact.email || "" });
         }
       } catch (error) {
-        console.error("Supabase load failed", error);
+        console.error("Firebase load failed", error);
         databaseAvailable.current = false;
       }
     };
@@ -239,19 +249,14 @@ function App() {
 
   useEffect(() => {
     if (view !== "admin" || !isAdminAuthed) return undefined;
-    if (!isSupabaseConfigured) return undefined;
 
     const refreshOrders = async () => {
       try {
-        const { data, error } = await supabase
-          .from("orders")
-          .select("*")
-          .order("created_at", { ascending: false });
-        if (error) throw error;
+        const ordersSnapshot = await getDocs(query(collection(db, "orders"), orderBy("createdAt", "desc")));
         databaseAvailable.current = true;
-        setOrders(data.map(orderFromSupabase));
+        setOrders(ordersSnapshot.docs.map((item) => orderFromFirebase(item.id, item.data())));
       } catch (error) {
-        console.error("Supabase order refresh failed", error);
+        console.error("Firebase order refresh failed", error);
         databaseAvailable.current = false;
       }
     };
@@ -264,29 +269,21 @@ function App() {
   const saveProducts = (updater) => {
     setProducts((current) => {
       const next = normalizeProducts(typeof updater === "function" ? updater(current) : updater);
+      const removedIds = current
+        .filter((product) => !next.some((nextProduct) => nextProduct.id === product.id))
+        .map((product) => product.id);
 
-      if (isSupabaseConfigured) {
-        const removedIds = current
-          .filter((product) => !next.some((nextProduct) => nextProduct.id === product.id))
-          .map((product) => product.id);
-
-        supabase
-          .from("products")
-          .upsert(next.map(productToSupabase))
-          .then(({ error }) => {
-            if (error) throw error;
-            if (removedIds.length === 0) return null;
-            return supabase.from("products").delete().in("id", removedIds);
-          })
-          .then((deleteResult) => {
-            if (deleteResult?.error) throw deleteResult.error;
-            databaseAvailable.current = true;
-          })
-          .catch((error) => {
-            console.error("Supabase product save failed", error);
-            databaseAvailable.current = false;
-          });
-      }
+      Promise.all([
+        ...next.map((product) => setDoc(doc(db, "products", product.id), productToFirebase(product))),
+        ...removedIds.map((id) => deleteDoc(doc(db, "products", id)))
+      ])
+        .then(() => {
+          databaseAvailable.current = true;
+        })
+        .catch((error) => {
+          console.error("Firebase product save failed", error);
+          databaseAvailable.current = false;
+        });
 
       return next;
     });
@@ -295,20 +292,19 @@ function App() {
   const saveOrders = (updater) => {
     setOrders((current) => {
       const next = typeof updater === "function" ? updater(current) : updater;
-
-      if (isSupabaseConfigured) {
-        supabase
-          .from("orders")
-          .upsert(next.map(orderToSupabase))
-          .then(({ error }) => {
-            if (error) throw error;
-            databaseAvailable.current = true;
-          })
-          .catch((error) => {
-            console.error("Supabase order save failed", error);
-            databaseAvailable.current = false;
-          });
-      }
+      const batch = writeBatch(db);
+      next.forEach((order) => {
+        batch.set(doc(db, "orders", order.id), orderToFirebase(order));
+      });
+      batch
+        .commit()
+        .then(() => {
+          databaseAvailable.current = true;
+        })
+        .catch((error) => {
+          console.error("Firebase order save failed", error);
+          databaseAvailable.current = false;
+        });
 
       return next;
     });
@@ -316,40 +312,24 @@ function App() {
 
   const saveStoreContact = (contact) => {
     setStoreContact(contact);
-
-    if (isSupabaseConfigured) {
-      supabase
-        .from("store_contact")
-        .upsert({ id: 1, phone: contact.phone, email: contact.email })
-        .then(({ error }) => {
-          if (error) throw error;
-          databaseAvailable.current = true;
-        })
-        .catch((error) => {
-          console.error("Supabase contact save failed", error);
-          databaseAvailable.current = false;
-        });
-    }
+    setDoc(doc(db, "storeContact", "main"), contact)
+      .then(() => {
+        databaseAvailable.current = true;
+      })
+      .catch((error) => {
+        console.error("Firebase contact save failed", error);
+        databaseAvailable.current = false;
+      });
   };
 
   const addOrder = async (order) => {
-    if (!isSupabaseConfigured) {
-      setOrders((current) => [order, ...current]);
-      return;
-    }
-
     try {
-      const { data, error } = await supabase
-        .from("orders")
-        .insert(orderToSupabase(order))
-        .select()
-        .single();
-      if (error) throw error;
-      const savedOrder = orderFromSupabase(data);
+      await setDoc(doc(db, "orders", order.id), orderToFirebase(order));
+      const savedOrder = order;
       databaseAvailable.current = true;
       setOrders((current) => [savedOrder, ...current.filter((item) => item.id !== savedOrder.id)]);
     } catch (error) {
-      console.error("Supabase order create failed", error);
+      console.error("Firebase order create failed", error);
       databaseAvailable.current = false;
       setOrders((current) => [order, ...current]);
     }

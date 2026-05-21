@@ -2,15 +2,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "api": "node server.js",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.106.1",
     "@vitejs/plugin-react": "latest",
-    "cors": "latest",
-    "express": "latest",
+    "firebase": "^12.13.0",
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",

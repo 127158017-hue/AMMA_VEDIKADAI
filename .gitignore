@@ -5,6 +5,7 @@ dist/
 .env
 .env.local
 firebase-debug.log
+*-firebase-adminsdk-*.json
 data/db.json
 vite.log
 vite.err.log
