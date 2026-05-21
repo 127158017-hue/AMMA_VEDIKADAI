@@ -130,15 +130,38 @@ function productToFirebase(product) {
   };
 }
 
-function orderFromFirebase(id, data) {
+function normalizeFirebaseDate(value) {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (typeof value.toDate === "function") return value.toDate().toISOString();
+  if (typeof value.seconds === "number") return new Date(value.seconds * 1000).toISOString();
+  return String(value);
+}
+
+function normalizeFirebaseItems(data) {
+  const items = data.items || data.cartItems || data.cart || data.products || [];
+  if (Array.isArray(items)) return items;
+  if (typeof items === "object") return Object.values(items);
+  return [];
+}
+
+function orderFromFirebase(id, data, sourceCollection = "orders") {
+  const customer = data.customer || {};
+  const items = normalizeFirebaseItems(data);
+
   return {
     id,
-    createdAt: data.createdAt,
-    customer: data.customer,
-    items: data.items,
-    total: Number(data.total || 0),
-    savings: Number(data.savings || 0),
-    status: data.status || "Order Pending"
+    sourceCollection,
+    createdAt: normalizeFirebaseDate(data.createdAt || data.created_at || data.date || data.timestamp),
+    customer: {
+      name: customer.name || data.name || data.customerName || data.fullName || "Customer",
+      phone: customer.phone || data.phone || data.phoneNumber || data.mobile || "",
+      address: customer.address || data.address || data.deliveryAddress || ""
+    },
+    items,
+    total: Number(data.total || data.totalPrice || data.amount || 0),
+    savings: Number(data.savings || data.discount || 0),
+    status: data.status || data.orderStatus || "Order Pending"
   };
 }
 
@@ -151,6 +174,36 @@ function orderToFirebase(order) {
     savings: Number(order.savings || 0),
     status: order.status || "Order Pending"
   };
+}
+
+function sortOrders(orders) {
+  return [...orders].sort((a, b) => {
+    const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return bTime - aTime;
+  });
+}
+
+async function fetchFirebaseOrders() {
+  const collectionNames = ["orders", "Orders"];
+  const snapshots = await Promise.all(
+    collectionNames.map((collectionName) =>
+      getDocs(collection(db, collectionName)).then((snapshot) => ({ collectionName, snapshot }))
+    )
+  );
+  const orderMap = new Map();
+
+  snapshots.forEach(({ collectionName, snapshot }) => {
+    snapshot.docs.forEach((item) => {
+      const order = orderFromFirebase(item.id, item.data(), collectionName);
+      const existing = orderMap.get(order.id);
+      if (!existing || existing.sourceCollection !== "orders") {
+        orderMap.set(order.id, order);
+      }
+    });
+  });
+
+  return sortOrders(Array.from(orderMap.values()));
 }
 
 function normalizeProducts(products) {
@@ -215,9 +268,9 @@ function App() {
   useEffect(() => {
     const loadDatabase = async () => {
       try {
-        const [productsSnapshot, ordersSnapshot, contactSnapshot] = await Promise.all([
+        const [productsSnapshot, firebaseOrders, contactSnapshot] = await Promise.all([
           getDocs(query(collection(db, "products"), orderBy("createdAt", "asc"))),
-          getDocs(query(collection(db, "orders"), orderBy("createdAt", "desc"))),
+          fetchFirebaseOrders(),
           getDoc(doc(db, "storeContact", "main"))
         ]);
 
@@ -231,7 +284,7 @@ function App() {
             sampleProducts.map((product) => setDoc(doc(db, "products", product.id), productToFirebase(product)))
           );
         }
-        setOrders(ordersSnapshot.docs.map((item) => orderFromFirebase(item.id, item.data())));
+        setOrders(firebaseOrders);
         if (contactSnapshot.exists()) {
           const contact = contactSnapshot.data();
           setStoreContact({ phone: contact.phone || "", email: contact.email || "" });
@@ -250,9 +303,9 @@ function App() {
 
     const refreshOrders = async () => {
       try {
-        const ordersSnapshot = await getDocs(query(collection(db, "orders"), orderBy("createdAt", "desc")));
+        const firebaseOrders = await fetchFirebaseOrders();
         databaseAvailable.current = true;
-        setOrders(ordersSnapshot.docs.map((item) => orderFromFirebase(item.id, item.data())));
+        setOrders(firebaseOrders);
       } catch (error) {
         console.error("Firebase order refresh failed", error);
         databaseAvailable.current = false;
@@ -292,7 +345,7 @@ function App() {
       const next = typeof updater === "function" ? updater(current) : updater;
       const batch = writeBatch(db);
       next.forEach((order) => {
-        batch.set(doc(db, "orders", order.id), orderToFirebase(order));
+        batch.set(doc(db, order.sourceCollection || "orders", order.id), orderToFirebase(order));
       });
       batch
         .commit()
@@ -323,7 +376,7 @@ function App() {
   const addOrder = async (order) => {
     await setDoc(doc(db, "orders", order.id), orderToFirebase(order));
     databaseAvailable.current = true;
-    setOrders((current) => [order, ...current.filter((item) => item.id !== order.id)]);
+    setOrders((current) => [{ ...order, sourceCollection: "orders" }, ...current.filter((item) => item.id !== order.id)]);
   };
 
   useEffect(() => {
@@ -1360,15 +1413,20 @@ function OrdersTable({ orders, setOrders }) {
             ) : (
               orders.map((order) => (
                 <tr key={order.id} className="align-top">
-                  <td className="px-4 py-3 font-bold">{order.customer.name}</td>
-                  <td className="px-4 py-3">{order.customer.phone}</td>
-                  <td className="max-w-64 px-4 py-3">{order.customer.address}</td>
+                  <td className="px-4 py-3 font-bold">{order.customer?.name || "Customer"}</td>
+                  <td className="px-4 py-3">{order.customer?.phone || "Not provided"}</td>
+                  <td className="max-w-64 px-4 py-3">{order.customer?.address || "Not provided"}</td>
                   <td className="px-4 py-3">
-                    {order.items.map((item) => (
-                      <div key={`${order.id}-${item.id}`} className="mb-1">
-                        {item.title} x {item.qty} ({formatPrice(item.price)})
-                      </div>
-                    ))}
+                    {order.items?.length ? (
+                      order.items.map((item, index) => (
+                        <div key={`${order.id}-${item.id || index}`} className="mb-1">
+                          {item.title || item.name || "Item"} x {item.qty || item.quantity || 1} (
+                          {formatPrice(Number(item.price || item.amount || 0))})
+                        </div>
+                      ))
+                    ) : (
+                      <span className="text-stone-500">No item details</span>
+                    )}
                   </td>
                   <td className="px-4 py-3 font-black">{formatPrice(order.total)}</td>
                   <td className="px-4 py-3">
