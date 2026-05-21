@@ -30,7 +30,6 @@ import { db } from "./firebaseClient";
 import "./styles.css";
 
 const PRODUCTS_KEY = "vedikadai.products";
-const ORDERS_KEY = "vedikadai.orders";
 const STORE_CONTACT_KEY = "vedikadai.storeContact";
 
 const categories = ["Ground-made", "Sivakasi Fancy"];
@@ -189,7 +188,7 @@ function getDiscountPercent(item) {
 function App() {
   const [view, setView] = useState(() => (window.location.pathname === "/admin" ? "admin" : "store"));
   const [products, setProducts] = useState(() => normalizeProducts(readStorage(PRODUCTS_KEY, sampleProducts)));
-  const [orders, setOrders] = useState(() => readStorage(ORDERS_KEY, []));
+  const [orders, setOrders] = useState([]);
   const [storeContact, setStoreContact] = useState(() => readStorage(STORE_CONTACT_KEY, defaultStoreContact));
   const [isAdminAuthed, setIsAdminAuthed] = useState(false);
   const databaseAvailable = useRef(false);
@@ -211,7 +210,6 @@ function App() {
   }, []);
 
   useEffect(() => writeStorage(PRODUCTS_KEY, products), [products]);
-  useEffect(() => writeStorage(ORDERS_KEY, orders), [orders]);
   useEffect(() => writeStorage(STORE_CONTACT_KEY, storeContact), [storeContact]);
 
   useEffect(() => {
@@ -323,16 +321,9 @@ function App() {
   };
 
   const addOrder = async (order) => {
-    try {
-      await setDoc(doc(db, "orders", order.id), orderToFirebase(order));
-      const savedOrder = order;
-      databaseAvailable.current = true;
-      setOrders((current) => [savedOrder, ...current.filter((item) => item.id !== savedOrder.id)]);
-    } catch (error) {
-      console.error("Firebase order create failed", error);
-      databaseAvailable.current = false;
-      setOrders((current) => [order, ...current]);
-    }
+    await setDoc(doc(db, "orders", order.id), orderToFirebase(order));
+    databaseAvailable.current = true;
+    setOrders((current) => [order, ...current.filter((item) => item.id !== order.id)]);
   };
 
   useEffect(() => {
@@ -389,6 +380,7 @@ function Storefront({ products, addOrder, storeContact, onAdminClick }) {
   const [cartOpen, setCartOpen] = useState(false);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [success, setSuccess] = useState("");
+  const [orderError, setOrderError] = useState("");
   const [thankYouOpen, setThankYouOpen] = useState(false);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
 
@@ -411,6 +403,7 @@ function Storefront({ products, addOrder, storeContact, onAdminClick }) {
       return [...items, { ...product, qty: 1 }];
     });
     setSuccess("");
+    setOrderError("");
   };
 
   const updateQty = (id, direction) => {
@@ -431,12 +424,18 @@ function Storefront({ products, addOrder, storeContact, onAdminClick }) {
       savings: cartSavings,
       status: "Order Pending"
     };
-    await addOrder(order);
-    setCart([]);
-    setCartOpen(false);
-    setCheckoutOpen(false);
-    setThankYouOpen(true);
-    setSuccess("");
+    try {
+      await addOrder(order);
+      setCart([]);
+      setCartOpen(false);
+      setCheckoutOpen(false);
+      setThankYouOpen(true);
+      setSuccess("");
+      setOrderError("");
+    } catch (error) {
+      console.error("Firebase order create failed", error);
+      setOrderError("Order could not be saved to Firebase. Please try again in a moment.");
+    }
   };
 
   return (
@@ -522,6 +521,11 @@ function Storefront({ products, addOrder, storeContact, onAdminClick }) {
           {success && (
             <div className="mb-5 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm font-semibold text-green-800">
               {success}
+            </div>
+          )}
+          {orderError && (
+            <div className="mb-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-800">
+              {orderError}
             </div>
           )}
 
@@ -1322,6 +1326,17 @@ function OrdersTable({ orders, setOrders }) {
 
   return (
     <section className="overflow-hidden rounded-lg border border-orange-100 bg-paper shadow-sm">
+      <div className="flex flex-col gap-2 border-b border-orange-100 bg-orange-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="font-black text-stone-950">Firebase Orders</h2>
+          <p className="text-xs font-semibold text-stone-500">
+            Orders shown here are loaded from Firebase Firestore, not this browser.
+          </p>
+        </div>
+        <span className="rounded-full bg-white px-3 py-1 text-xs font-black text-flame ring-1 ring-orange-100">
+          {orders.length} orders
+        </span>
+      </div>
       <div className="overflow-x-auto">
         <table className="min-w-full text-left text-sm">
           <thead className="bg-orange-50 text-xs uppercase tracking-[0.12em] text-stone-500">

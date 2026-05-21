@@ -32,4 +32,4 @@ The dashboard has three tabs:
 
 ## Important Note
 
-This app uses browser `localStorage` only. Product data, orders, uploaded images, and store contact details are saved in the current browser on the current device.
+Orders, products, and store contact details are saved in Firebase Firestore. The admin dashboard reads orders from Firebase, so orders placed from other devices can appear in the admin panel.
